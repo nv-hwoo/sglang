@@ -109,6 +109,7 @@ from sglang.srt.managers.io_struct import (
     FreezeGCReq,
     GetInternalStateReq,
     GetInternalStateReqOutput,
+    GetModelExpressStatusReqInput,
     GetWeightsByNameReqInput,
     HealthCheckOutput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
@@ -122,8 +123,10 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
+    MarkModelExpressPoisonedReqInput,
     OpenSessionReqInput,
     PauseGenerationReqInput,
+    PrepareWeightsFromModelExpressReqInput,
     ProfileReq,
     PullWeightsReqInput,
     ReleaseMemoryOccupationReqInput,
@@ -148,6 +151,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
+    UpdateWeightsFromModelExpressReqInput,
     UpdateWeightsFromTensorReqInput,
     sock_send,
 )
@@ -1353,6 +1357,22 @@ class Scheduler(
                 (
                     UpdateWeightFromDiskReqInput,
                     self.weight_updater.update_weights_from_disk,
+                ),
+                (
+                    PrepareWeightsFromModelExpressReqInput,
+                    self.weight_updater.prepare_weights_from_modelexpress,
+                ),
+                (
+                    UpdateWeightsFromModelExpressReqInput,
+                    self.weight_updater.update_weights_from_modelexpress,
+                ),
+                (
+                    MarkModelExpressPoisonedReqInput,
+                    self.weight_updater.mark_modelexpress_poisoned,
+                ),
+                (
+                    GetModelExpressStatusReqInput,
+                    self.weight_updater.get_modelexpress_status,
                 ),
                 (
                     InitWeightsUpdateGroupReqInput,

@@ -2630,6 +2630,25 @@ class ServerArgs:
         Optional[str],
         "Import path of a hook(source_dir, target_version) that /pull_weights calls before reading the published weights. POSIX shared filesystems need no hook; object-store-backed mounts often lack cross-host read-after-write consistency, so another host's writes only become visible after an explicit refresh.",
     ] = None
+    modelexpress_delta_s3_endpoint: A[
+        Optional[str], "S3-compatible endpoint for ModelExpress canonical objects."
+    ] = None
+    modelexpress_catalog_endpoint: A[
+        Optional[str], "ModelExpress revision catalog gRPC endpoint."
+    ] = None
+    modelexpress_model_id: A[
+        Optional[str], "Stable ModelExpress model revision lineage."
+    ] = None
+    modelexpress_initial_version: A[
+        Optional[str], "Exact ModelExpress version loaded at engine startup."
+    ] = None
+    modelexpress_ready_timeout_seconds: A[
+        float, "Seconds to wait for the launch revision to become ready."
+    ] = 600.0
+    modelexpress_preparation_cache_dir: A[
+        Optional[str],
+        "Host-local, model-ID-namespaced exact-base and prepared-target directory.",
+    ] = None
     weight_loader_disable_mmap: A[
         bool,
         "Disable mmap while loading weight using safetensors.",
@@ -2931,6 +2950,7 @@ class ServerArgs:
             return
 
         self._handle_model_source_paths()
+        self._handle_modelexpress_delta_receiver()
 
         # Validate mm_process_config.
         self._handle_multimodal()
@@ -3147,6 +3167,25 @@ class ServerArgs:
                 f"Automatically turn off --chunked-prefill-size as it is not supported for "
                 f"{hf_config.model_type}"
             )
+
+    def _handle_modelexpress_delta_receiver(self) -> None:
+        configured = {
+            "--modelexpress-model-id": self.modelexpress_model_id,
+            "--modelexpress-catalog-endpoint": self.modelexpress_catalog_endpoint,
+            "--modelexpress-initial-version": self.modelexpress_initial_version,
+            "--modelexpress-preparation-cache-dir": (
+                self.modelexpress_preparation_cache_dir
+            ),
+        }
+        if not any(value is not None for value in configured.values()):
+            return
+        missing = [
+            flag
+            for flag, value in configured.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            raise ValueError("ModelExpress V0 receiver requires " + ", ".join(missing))
 
     def _handle_model_source_paths(self):
         """Resolve model/tokenizer paths backed by remote object stores."""

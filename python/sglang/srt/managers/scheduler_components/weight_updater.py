@@ -27,10 +27,14 @@ from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqOutput,
     EndWeightUpdateReqInput,
     EndWeightUpdateReqOutput,
+    GetModelExpressStatusReqInput,
     GetWeightsByNameReqInput,
     GetWeightsByNameReqOutput,
     InitWeightsUpdateGroupReqInput,
     InitWeightsUpdateGroupReqOutput,
+    MarkModelExpressPoisonedReqInput,
+    ModelExpressWeightUpdateReqOutput,
+    PrepareWeightsFromModelExpressReqInput,
     PullWeightsReqInput,
     PullWeightsReqOutput,
     ReleaseMemoryOccupationReqInput,
@@ -43,6 +47,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqOutput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromIPCReqOutput,
+    UpdateWeightsFromModelExpressReqInput,
     UpdateWeightsFromTensorReqInput,
     UpdateWeightsFromTensorReqOutput,
 )
@@ -136,6 +141,142 @@ class SchedulerWeightUpdaterManager:
             return UpdateWeightFromDiskReqOutput(
                 success=success, message=message, num_paused_requests=0
             )
+
+    @staticmethod
+    def _modelexpress_output(value, *, success: Optional[bool] = None):
+        state = getattr(value, "state", None)
+        return ModelExpressWeightUpdateReqOutput(
+            success=(getattr(value, "success", True) if success is None else success),
+            receiver_id=value.receiver_id,
+            installed_version=value.installed_version,
+            state=state.name if state is not None else None,
+            target_digest=getattr(value, "target_digest", None),
+            detail=getattr(value, "detail", ""),
+        )
+
+    def _modelexpress_receiver(self):
+        receiver = getattr(self.tp_worker.model_runner, "modelexpress_receiver", None)
+        if receiver is None:
+            raise RuntimeError("ModelExpress V0 receiver is not configured")
+        if self.draft_worker is not None:
+            raise RuntimeError("ModelExpress V0 does not support draft models")
+        return receiver
+
+    def _modelexpress_tp_agreement(
+        self,
+        output: ModelExpressWeightUpdateReqOutput,
+        *,
+        mutation_phase: bool,
+    ) -> ModelExpressWeightUpdateReqOutput:
+        if not torch.distributed.is_initialized():
+            return output
+        world_size = torch.distributed.get_world_size(group=self.tp_cpu_group)
+        if world_size <= 1:
+            return output
+        results: List[ModelExpressWeightUpdateReqOutput] = [output] * world_size
+        torch.distributed.all_gather_object(results, output, group=self.tp_cpu_group)
+        identities = {
+            (item.success, item.installed_version, item.state, item.target_digest)
+            for item in results
+        }
+        if len(identities) == 1:
+            return output
+        detail = "engine-local TP ranks disagree on ModelExpress target identity"
+        if mutation_phase and any(
+            item.success or item.state == "POISONED" for item in results
+        ):
+            return self._modelexpress_output(
+                self._modelexpress_receiver().mark_poisoned(detail)
+            )
+        failures = [item for item in results if not item.success]
+        if failures:
+            return failures[0]
+        return ModelExpressWeightUpdateReqOutput(
+            success=False,
+            receiver_id=output.receiver_id,
+            installed_version=output.installed_version,
+            state=output.state,
+            target_digest=output.target_digest,
+            detail=detail,
+        )
+
+    def prepare_weights_from_modelexpress(
+        self, recv_req: PrepareWeightsFromModelExpressReqInput
+    ):
+        receiver = self._modelexpress_receiver()
+        try:
+            receiver.start_weight_update(recv_req.target_version)
+            status = receiver.status()
+            output = ModelExpressWeightUpdateReqOutput(
+                success=True,
+                receiver_id=status.receiver_id,
+                installed_version=status.installed_version,
+                state=status.state.name if status.state is not None else None,
+                target_digest=receiver.prepared_identity.target_digest,
+            )
+        except Exception as exc:
+            status = receiver.status()
+            output = ModelExpressWeightUpdateReqOutput(
+                success=False,
+                receiver_id=status.receiver_id,
+                installed_version=status.installed_version,
+                state=status.state.name if status.state is not None else None,
+                detail=str(exc),
+            )
+        return self._modelexpress_tp_agreement(output, mutation_phase=False)
+
+    def update_weights_from_modelexpress(
+        self, recv_req: UpdateWeightsFromModelExpressReqInput
+    ):
+        receiver = self._modelexpress_receiver()
+        status = receiver.status()
+        prepared = receiver.prepared_identity
+        if prepared is None or prepared.target_version != recv_req.target_version:
+            precheck = ModelExpressWeightUpdateReqOutput(
+                success=False,
+                receiver_id=status.receiver_id,
+                installed_version=status.installed_version,
+                state=status.state.name if status.state is not None else None,
+                detail="requested target is not prepared",
+            )
+        else:
+            precheck = ModelExpressWeightUpdateReqOutput(
+                success=True,
+                receiver_id=status.receiver_id,
+                installed_version=status.installed_version,
+                state=status.state.name if status.state is not None else None,
+                target_digest=receiver.prepared_identity.target_digest,
+            )
+        precheck = self._modelexpress_tp_agreement(precheck, mutation_phase=False)
+        if not precheck.success:
+            return precheck
+
+        result = receiver.update_weights()
+        if result.success:
+            try:
+                cache_valid = self.flush_cache(empty_cache=False)
+            except Exception as exc:
+                result = receiver.mark_poisoned(
+                    f"cache invalidation raised after install: {exc}"
+                )
+            else:
+                if not cache_valid:
+                    result = receiver.mark_poisoned(
+                        "cache invalidation failed after install"
+                    )
+        return self._modelexpress_tp_agreement(
+            self._modelexpress_output(result), mutation_phase=True
+        )
+
+    def mark_modelexpress_poisoned(self, recv_req: MarkModelExpressPoisonedReqInput):
+        result = self._modelexpress_receiver().mark_poisoned(recv_req.detail)
+        return self._modelexpress_tp_agreement(
+            self._modelexpress_output(result), mutation_phase=True
+        )
+
+    def get_modelexpress_status(self, _recv_req: GetModelExpressStatusReqInput):
+        output = self._modelexpress_output(self._modelexpress_receiver().status())
+        return self._modelexpress_tp_agreement(output, mutation_phase=False)
 
     def pull_weights(self, recv_req: PullWeightsReqInput):
         """Sync this host's local checkpoint up to recv_req.target_version.

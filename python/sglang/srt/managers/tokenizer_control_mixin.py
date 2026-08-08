@@ -38,6 +38,7 @@ from sglang.srt.managers.io_struct import (
     FlushCacheReqOutput,
     GetInternalStateReq,
     GetInternalStateReqOutput,
+    GetModelExpressStatusReqInput,
     GetWeightsByNameReqInput,
     GetWeightsByNameReqOutput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
@@ -53,7 +54,10 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
     LoRAUpdateOutput,
+    MarkModelExpressPoisonedReqInput,
+    ModelExpressWeightUpdateReqOutput,
     OpenSessionReqInput,
+    PrepareWeightsFromModelExpressReqInput,
     ProfileReq,
     ProfileReqOutput,
     ProfileReqType,
@@ -78,6 +82,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqOutput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromIPCReqOutput,
+    UpdateWeightsFromModelExpressReqInput,
     UpdateWeightsFromTensorReqInput,
     UpdateWeightsFromTensorReqOutput,
 )
@@ -113,6 +118,7 @@ _COMMUNICATOR_SPECS = [
     ("release_memory_occupation", ReleaseMemoryOccupationReqOutput),
     ("resume_memory_occupation", ResumeMemoryOccupationReqOutput),
     ("check_weights", CheckWeightsReqOutput),
+    ("modelexpress", ModelExpressWeightUpdateReqOutput),
     ("pull_weights", PullWeightsReqOutput),
     ("slow_down", SlowDownReqOutput),
     ("flush_cache", FlushCacheReqOutput),
@@ -927,6 +933,98 @@ class TokenizerControlMixin:
     ):
         self.auto_create_handle_loop()
         await self.resume_memory_occupation_communicator(obj)
+
+    async def prepare_weights_from_modelexpress(
+        self: TokenizerManager,
+        obj: PrepareWeightsFromModelExpressReqInput,
+        request: Optional[fastapi.Request] = None,
+    ) -> ModelExpressWeightUpdateReqOutput:
+        self.auto_create_handle_loop()
+        results = await self.modelexpress_communicator(obj)
+        return self._merge_modelexpress_results(results, mutation_phase=False)
+
+    async def update_weights_from_modelexpress(
+        self: TokenizerManager,
+        obj: UpdateWeightsFromModelExpressReqInput,
+        request: Optional[fastapi.Request] = None,
+    ) -> ModelExpressWeightUpdateReqOutput:
+        self.auto_create_handle_loop()
+        async with self.model_update_lock.writer_lock:
+            results = await self.modelexpress_communicator(obj)
+            result = self._merge_modelexpress_results(results, mutation_phase=True)
+            if result.state == "POISONED":
+                # Fence serving before durable receiver/catalog poison fanout. The
+                # latch must survive communicator failure or task cancellation.
+                self._modelexpress_poisoned = True
+                detail = result.detail
+                try:
+                    poisoned_results = await self.modelexpress_communicator(
+                        MarkModelExpressPoisonedReqInput(detail=detail)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    result.detail = (
+                        f"{detail}; poison fanout failed; reconciliation required: "
+                        f"{exc}"
+                    )
+                else:
+                    if any(
+                        poisoned.state != "POISONED" for poisoned in poisoned_results
+                    ):
+                        result.detail = (
+                            f"{detail}; failed to poison every receiver; "
+                            "reconciliation required"
+                        )
+        if result.success:
+            self._update_weight_version_if_provided(result.installed_version)
+        return result
+
+    async def get_modelexpress_status(
+        self: TokenizerManager,
+        obj: GetModelExpressStatusReqInput,
+        request: Optional[fastapi.Request] = None,
+    ) -> ModelExpressWeightUpdateReqOutput:
+        self.auto_create_handle_loop()
+        results = await self.modelexpress_communicator(obj)
+        return self._merge_modelexpress_results(results, mutation_phase=False)
+
+    @staticmethod
+    def _merge_modelexpress_results(results, *, mutation_phase: bool):
+        if not results:
+            raise RuntimeError("ModelExpress update returned no engine-local results")
+        identities = {
+            (result.installed_version, result.state, result.target_digest)
+            for result in results
+        }
+        failures = [result for result in results if not result.success]
+        if mutation_phase and (
+            any(result.state == "POISONED" for result in results)
+            or (failures and len(failures) != len(results))
+            or len(identities) != 1
+        ):
+            first = results[0]
+            return ModelExpressWeightUpdateReqOutput(
+                success=False,
+                receiver_id=first.receiver_id,
+                installed_version=first.installed_version,
+                state="POISONED",
+                target_digest=None,
+                detail="engine-local ranks diverged after ModelExpress mutation",
+            )
+        if failures:
+            return failures[0]
+        if len(identities) != 1:
+            first = results[0]
+            return ModelExpressWeightUpdateReqOutput(
+                success=False,
+                receiver_id=first.receiver_id,
+                installed_version=first.installed_version,
+                state=first.state,
+                target_digest=first.target_digest,
+                detail="engine-local ranks disagree on ModelExpress target identity",
+            )
+        return results[0]
 
     async def pull_weights(
         self: TokenizerManager,
