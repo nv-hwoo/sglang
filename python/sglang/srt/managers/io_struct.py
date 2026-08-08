@@ -1805,6 +1805,33 @@ class UpdateWeightFromDiskReqOutput(BaseReq, kw_only=True):
     num_paused_requests: int = 0
 
 
+class PrepareWeightsFromModelExpressReqInput(BaseReq, kw_only=True):
+    target_version: str
+
+
+class UpdateWeightsFromModelExpressReqInput(BaseReq, kw_only=True):
+    target_version: str
+
+
+class GetModelExpressStatusReqInput(BaseReq, kw_only=True):
+    pass
+
+
+class MarkModelExpressPoisonedReqInput(BaseReq, kw_only=True):
+    """Internal fanout used when post-mutation engine results diverge."""
+
+    detail: str
+
+
+class ModelExpressWeightUpdateReqOutput(BaseReq, kw_only=True):
+    success: bool
+    receiver_id: str
+    installed_version: Optional[str]
+    state: Optional[str]
+    target_digest: Optional[str] = None
+    detail: str = ""
+
+
 class UpdateWeightsFromDistributedReqInput(BaseReq, kw_only=True):
     names: List[str]
     dtypes: List[str]

@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 def handle_model_source_paths(server_args: Any):
     """Prepare metadata for model paths backed by remote object stores."""
     cfg = resolving_view(server_args)
+    modelexpress_config = {
+        "--modelexpress-model-id": cfg.modelexpress_model_id,
+        "--modelexpress-catalog-endpoint": cfg.modelexpress_catalog_endpoint,
+        "--modelexpress-initial-version": cfg.modelexpress_initial_version,
+        "--modelexpress-preparation-cache-dir": cfg.modelexpress_preparation_cache_dir,
+    }
+    if any(value is not None for value in modelexpress_config.values()):
+        missing = [
+            flag
+            for flag, value in modelexpress_config.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            raise ValueError("ModelExpress V0 receiver requires " + ", ".join(missing))
     resolve_hf_gguf_model_path(server_args)
 
     seen_paths = set()

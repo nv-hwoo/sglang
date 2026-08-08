@@ -779,6 +779,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         request: Optional[fastapi.Request] = None,
     ):
         self.auto_create_handle_loop()
+        if getattr(self, "_modelexpress_poisoned", False):
+            raise RuntimeError(
+                "ModelExpress receiver is poisoned; complete recovery is required"
+            )
 
         # Normalize the request
         obj.normalize_batch_and_arguments()
