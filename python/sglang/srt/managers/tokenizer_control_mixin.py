@@ -1024,7 +1024,12 @@ class TokenizerControlMixin:
                 target_digest=first.target_digest,
                 detail="engine-local ranks disagree on ModelExpress target identity",
             )
-        return results[0]
+        result = results[0]
+        result.metrics = {
+            key: max(item.metrics.get(key, 0.0) for item in results)
+            for key in {key for item in results for key in item.metrics}
+        }
+        return result
 
     async def pull_weights(
         self: TokenizerManager,

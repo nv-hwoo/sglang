@@ -33,9 +33,16 @@ register_cpu_ci(est_time=15, suite="base-a-test-cpu")
 class Receiver:
     def __init__(self):
         self.prepared = []
+        self.metrics = [
+            {"perf/mx_receive_prepare_time": 2.0},
+            {"perf/mx_receive_install_time": 3.0},
+        ]
 
     def start_weight_update(self, version):
         self.prepared.append(version)
+
+    def pop_metrics(self):
+        return self.metrics.pop(0)
 
     @property
     def prepared_identity(self):
@@ -100,10 +107,37 @@ def test_scheduler_v0_handlers_are_thin_receiver_forwarders():
 
     assert receiver.prepared == ["2"]
     assert prepared.success is True
+    assert prepared.metrics == {"perf/mx_receive_prepare_time": 2.0}
     assert installed.success is True
     assert installed.installed_version == "2"
     assert installed.target_digest == "sha256:target"
+    assert installed.metrics == {"perf/mx_receive_install_time": 3.0}
     assert status.state == "VERIFIED"
+
+
+def test_receive_metrics_merge_by_max_latency():
+    first = ModelExpressWeightUpdateReqOutput(
+        success=True,
+        receiver_id="dp0",
+        installed_version="2",
+        state="VERIFIED",
+        target_digest="sha256:target",
+        metrics={"perf/mx_receive_prepare_time": 2.0},
+    )
+    second = ModelExpressWeightUpdateReqOutput(
+        success=True,
+        receiver_id="dp1",
+        installed_version="2",
+        state="VERIFIED",
+        target_digest="sha256:target",
+        metrics={"perf/mx_receive_prepare_time": 3.0},
+    )
+
+    result = TokenizerControlMixin._merge_modelexpress_results(
+        [first, second], mutation_phase=False
+    )
+
+    assert result.metrics == {"perf/mx_receive_prepare_time": 3.0}
 
 
 def test_installing_an_unprepared_target_is_refused_without_mutating():

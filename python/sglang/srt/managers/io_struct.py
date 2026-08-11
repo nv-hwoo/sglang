@@ -1594,6 +1594,7 @@ class ModelExpressWeightUpdateReqOutput(BaseReq, kw_only=True):
     state: Optional[str]
     target_digest: Optional[str] = None
     detail: str = ""
+    metrics: Dict[str, float] = msgspec.field(default_factory=dict)
 
 
 class PullWeightsReqInput(BaseReq, kw_only=True):
