@@ -871,7 +871,7 @@ class TokenizerControlMixin:
         return self._merge_modelexpress_results(results, mutation_phase=False)
 
     @staticmethod
-    def _merge_modelexpress_results(results, *, mutation_phase: bool):
+    def _merge_modelexpress_results(results, mutation_phase: bool):
         if not results:
             raise RuntimeError("ModelExpress update returned no engine-local results")
         identities = {

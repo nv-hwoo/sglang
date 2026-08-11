@@ -666,14 +666,6 @@ class ModelRunner:
         )
         self.maybe_init_dwdp()
 
-        self.modelexpress_receiver = None
-        if self.server_args.modelexpress_model_id is not None:
-            from sglang.srt.model_executor.model_runner_components.modelexpress_weight_receiver import (
-                build_modelexpress_weight_receiver,
-            )
-
-            self.modelexpress_receiver = build_modelexpress_weight_receiver(self)
-
         # Must run before backend/graph init so no draft graph records a
         # routed-experts capture-write kernel.
         if self.is_draft_worker:

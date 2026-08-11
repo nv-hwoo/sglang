@@ -38,7 +38,7 @@ def handle_model_source_paths(server_args: Any):
             if not isinstance(value, str) or not value.strip()
         ]
         if missing:
-            raise ValueError("ModelExpress V0 receiver requires " + ", ".join(missing))
+            raise ValueError("ModelExpress receiver requires " + ", ".join(missing))
     resolve_hf_gguf_model_path(server_args)
 
     seen_paths = set()
