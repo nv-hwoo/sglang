@@ -97,6 +97,7 @@ class SchedulerWeightUpdaterManager:
     is_fully_idle: Callable[..., bool]
     scheduler: Optional[Any] = None
     metrics_collector: Optional[Any] = None
+    modelexpress_receiver: Any = field(default=None, init=False)
     offload_tags: set = field(default_factory=set)
     stashed_model_static_state: Any = None
     _weight_update_in_progress: bool = False
@@ -145,7 +146,6 @@ class SchedulerWeightUpdaterManager:
     @staticmethod
     def _modelexpress_output(
         value,
-        *,
         success: Optional[bool] = None,
         metrics: Optional[Dict[str, float]] = None,
     ):
@@ -161,17 +161,19 @@ class SchedulerWeightUpdaterManager:
         )
 
     def _modelexpress_receiver(self):
-        receiver = getattr(self.tp_worker.model_runner, "modelexpress_receiver", None)
-        if receiver is None:
-            raise RuntimeError("ModelExpress V0 receiver is not configured")
         if self.draft_worker is not None:
-            raise RuntimeError("ModelExpress V0 does not support draft models")
-        return receiver
+            raise RuntimeError("ModelExpress does not support draft models")
+        if self.modelexpress_receiver is None:
+            from modelexpress.refit.receiver import build_weight_receiver
+
+            self.modelexpress_receiver = build_weight_receiver(
+                self.tp_worker.model_runner
+            )
+        return self.modelexpress_receiver
 
     def _modelexpress_tp_agreement(
         self,
         output: ModelExpressWeightUpdateReqOutput,
-        *,
         mutation_phase: bool,
     ) -> ModelExpressWeightUpdateReqOutput:
         if not torch.distributed.is_initialized():

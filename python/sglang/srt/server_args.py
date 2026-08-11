@@ -3185,7 +3185,7 @@ class ServerArgs:
             if not isinstance(value, str) or not value.strip()
         ]
         if missing:
-            raise ValueError("ModelExpress V0 receiver requires " + ", ".join(missing))
+            raise ValueError("ModelExpress receiver requires " + ", ".join(missing))
 
     def _handle_model_source_paths(self):
         """Resolve model/tokenizer paths backed by remote object stores."""

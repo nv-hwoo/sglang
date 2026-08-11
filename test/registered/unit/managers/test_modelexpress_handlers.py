@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -85,15 +85,49 @@ class Receiver:
 def manager(receiver):
     value = object.__new__(SchedulerWeightUpdaterManager)
     value.tp_worker = SimpleNamespace(
-        model_runner=SimpleNamespace(modelexpress_receiver=receiver)
+        model_runner=SimpleNamespace(
+            server_args=SimpleNamespace(modelexpress_model_id="model")
+        )
     )
+    value.modelexpress_receiver = receiver
     value.draft_worker = None
     value.tp_cpu_group = object()
     value.flush_cache = lambda **_kwargs: True
     return value
 
 
-def test_scheduler_v0_handlers_are_thin_receiver_forwarders():
+def test_receiver_is_built_once_on_first_manager_access(monkeypatch):
+    receiver = Receiver()
+    updater = manager(None)
+    updater.tp_worker.model_runner.server_args.modelexpress_model_id = None
+    built_for = []
+
+    def build(model_runner):
+        built_for.append(model_runner)
+        return receiver
+
+    modelexpress = ModuleType("modelexpress")
+    modelexpress.__path__ = []
+    refit = ModuleType("modelexpress.refit")
+    refit.__path__ = []
+    receiver_module = ModuleType("modelexpress.refit.receiver")
+    receiver_module.build_weight_receiver = build
+    monkeypatch.setitem(sys.modules, "modelexpress", modelexpress)
+    monkeypatch.setitem(sys.modules, "modelexpress.refit", refit)
+    monkeypatch.setitem(sys.modules, "modelexpress.refit.receiver", receiver_module)
+
+    status = updater.get_modelexpress_status(GetModelExpressStatusReqInput())
+    prepared = updater.prepare_weights_from_modelexpress(
+        PrepareWeightsFromModelExpressReqInput(target_version="2")
+    )
+
+    assert status.state == "VERIFIED"
+    assert prepared.success is True
+    assert built_for == [updater.tp_worker.model_runner]
+    assert updater.modelexpress_receiver is receiver
+
+
+def test_scheduler_handlers_are_thin_receiver_forwarders():
     receiver = Receiver()
     updater = manager(receiver)
 
