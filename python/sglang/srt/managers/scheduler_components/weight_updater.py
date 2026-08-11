@@ -134,7 +134,12 @@ class SchedulerWeightUpdaterManager:
             )
 
     @staticmethod
-    def _modelexpress_output(value, *, success: Optional[bool] = None):
+    def _modelexpress_output(
+        value,
+        *,
+        success: Optional[bool] = None,
+        metrics: Optional[Dict[str, float]] = None,
+    ):
         state = getattr(value, "state", None)
         return ModelExpressWeightUpdateReqOutput(
             success=(getattr(value, "success", True) if success is None else success),
@@ -143,6 +148,7 @@ class SchedulerWeightUpdaterManager:
             state=state.name if state is not None else None,
             target_digest=getattr(value, "target_digest", None),
             detail=getattr(value, "detail", ""),
+            metrics=metrics or {},
         )
 
     def _modelexpress_receiver(self):
@@ -171,6 +177,10 @@ class SchedulerWeightUpdaterManager:
             for item in results
         }
         if len(identities) == 1:
+            output.metrics = {
+                key: max(item.metrics.get(key, 0.0) for item in results)
+                for key in {key for item in results for key in item.metrics}
+            }
             return output
         detail = "engine-local TP ranks disagree on ModelExpress target identity"
         if mutation_phase and any(
@@ -204,6 +214,7 @@ class SchedulerWeightUpdaterManager:
                 installed_version=status.installed_version,
                 state=status.state.name if status.state is not None else None,
                 target_digest=receiver.prepared_identity.target_digest,
+                metrics=receiver.pop_metrics(),
             )
         except Exception as exc:
             status = receiver.status()
@@ -256,7 +267,8 @@ class SchedulerWeightUpdaterManager:
                         "cache invalidation failed after install"
                     )
         return self._modelexpress_tp_agreement(
-            self._modelexpress_output(result), mutation_phase=True
+            self._modelexpress_output(result, metrics=receiver.pop_metrics()),
+            mutation_phase=True,
         )
 
     def mark_modelexpress_poisoned(self, recv_req: MarkModelExpressPoisonedReqInput):
