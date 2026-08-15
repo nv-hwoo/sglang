@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 import time
 import traceback
 from contextlib import contextmanager
@@ -164,11 +165,34 @@ class SchedulerWeightUpdaterManager:
         if self.draft_worker is not None:
             raise RuntimeError("ModelExpress does not support draft models")
         if self.modelexpress_receiver is None:
-            from modelexpress.refit.receiver import build_weight_receiver
-
-            self.modelexpress_receiver = build_weight_receiver(
-                self.tp_worker.model_runner
+            from modelexpress.refit.factory import (
+                RolloutBackend,
+                build_delta_receiver,
             )
+            from modelexpress.refit.receiver import ReceiverConfig
+
+            model_runner = self.tp_worker.model_runner
+            args = model_runner.server_args
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_initialized()
+                else 0
+            )
+            receiver = build_delta_receiver(
+                RolloutBackend.SGLANG,
+                config=ReceiverConfig(
+                    model_id=args.modelexpress_model_id,
+                    catalog_endpoint=args.modelexpress_catalog_endpoint,
+                    initial_version=args.modelexpress_initial_version,
+                    preparation_cache_dir=args.modelexpress_preparation_cache_dir,
+                    ready_timeout_seconds=args.modelexpress_ready_timeout_seconds,
+                    s3_endpoint_url=args.modelexpress_delta_s3_endpoint,
+                ),
+                receiver_id=f"{socket.gethostname()}:{rank}",
+                model_runner=model_runner,
+            )
+            receiver.initialize()
+            self.modelexpress_receiver = receiver
         return self.modelexpress_receiver
 
     def _modelexpress_tp_agreement(

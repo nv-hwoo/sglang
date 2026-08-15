@@ -19,6 +19,9 @@ from sglang.srt.managers.io_struct import (  # noqa: E402
     PrepareWeightsFromModelExpressReqInput,
     UpdateWeightsFromModelExpressReqInput,
 )
+from sglang.srt.managers.scheduler_components import (  # noqa: E402
+    weight_updater as weight_updater_module,
+)
 from sglang.srt.managers.scheduler_components.weight_updater import (  # noqa: E402
     SchedulerWeightUpdaterManager,
 )
@@ -32,11 +35,15 @@ register_cpu_ci(est_time=15, suite="base-a-test-cpu")
 
 class Receiver:
     def __init__(self):
+        self.initialized = 0
         self.prepared = []
         self.metrics = [
             {"perf/mx_receive_prepare_time": 2.0},
             {"perf/mx_receive_install_time": 3.0},
         ]
+
+    def initialize(self):
+        self.initialized += 1
 
     def start_weight_update(self, version):
         self.prepared.append(version)
@@ -86,7 +93,14 @@ def manager(receiver):
     value = object.__new__(SchedulerWeightUpdaterManager)
     value.tp_worker = SimpleNamespace(
         model_runner=SimpleNamespace(
-            server_args=SimpleNamespace(modelexpress_model_id="model")
+            server_args=SimpleNamespace(
+                modelexpress_model_id="model",
+                modelexpress_catalog_endpoint="mx:8001",
+                modelexpress_initial_version="0",
+                modelexpress_preparation_cache_dir="/tmp/mx-cache",
+                modelexpress_ready_timeout_seconds=123,
+                modelexpress_delta_s3_endpoint="http://minio:9000",
+            )
         )
     )
     value.modelexpress_receiver = receiver
@@ -99,22 +113,38 @@ def manager(receiver):
 def test_receiver_is_built_once_on_first_manager_access(monkeypatch):
     receiver = Receiver()
     updater = manager(None)
-    updater.tp_worker.model_runner.server_args.modelexpress_model_id = None
-    built_for = []
+    built = []
 
-    def build(model_runner):
-        built_for.append(model_runner)
+    def build(backend, **kwargs):
+        built.append((backend, kwargs))
         return receiver
+
+    class ReceiverConfig(SimpleNamespace):
+        def __init__(self, **values):
+            super().__init__(**values)
+
+    class RolloutBackend:
+        SGLANG = "sglang"
 
     modelexpress = ModuleType("modelexpress")
     modelexpress.__path__ = []
     refit = ModuleType("modelexpress.refit")
     refit.__path__ = []
+    factory_module = ModuleType("modelexpress.refit.factory")
+    factory_module.RolloutBackend = RolloutBackend
+    factory_module.build_delta_receiver = build
     receiver_module = ModuleType("modelexpress.refit.receiver")
-    receiver_module.build_weight_receiver = build
+    receiver_module.ReceiverConfig = ReceiverConfig
     monkeypatch.setitem(sys.modules, "modelexpress", modelexpress)
     monkeypatch.setitem(sys.modules, "modelexpress.refit", refit)
+    monkeypatch.setitem(sys.modules, "modelexpress.refit.factory", factory_module)
     monkeypatch.setitem(sys.modules, "modelexpress.refit.receiver", receiver_module)
+    monkeypatch.setattr(
+        weight_updater_module,
+        "socket",
+        SimpleNamespace(gethostname=lambda: "host"),
+        raising=False,
+    )
 
     status = updater.get_modelexpress_status(GetModelExpressStatusReqInput())
     prepared = updater.prepare_weights_from_modelexpress(
@@ -123,7 +153,20 @@ def test_receiver_is_built_once_on_first_manager_access(monkeypatch):
 
     assert status.state == "VERIFIED"
     assert prepared.success is True
-    assert built_for == [updater.tp_worker.model_runner]
+    assert len(built) == 1
+    backend, kwargs = built[0]
+    assert backend == RolloutBackend.SGLANG
+    assert kwargs["model_runner"] is updater.tp_worker.model_runner
+    assert kwargs["receiver_id"] == "host:0"
+    assert vars(kwargs["config"]) == {
+        "model_id": "model",
+        "catalog_endpoint": "mx:8001",
+        "initial_version": "0",
+        "preparation_cache_dir": "/tmp/mx-cache",
+        "ready_timeout_seconds": 123,
+        "s3_endpoint_url": "http://minio:9000",
+    }
+    assert receiver.initialized == 1
     assert updater.modelexpress_receiver is receiver
 
 
