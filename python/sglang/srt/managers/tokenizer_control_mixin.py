@@ -875,8 +875,7 @@ class TokenizerControlMixin:
         if not results:
             raise RuntimeError("ModelExpress update returned no engine-local results")
         identities = {
-            (result.installed_version, result.state, result.target_digest)
-            for result in results
+            (result.installed_version, result.state) for result in results
         }
         failures = [result for result in results if not result.success]
         if mutation_phase and (
@@ -890,7 +889,6 @@ class TokenizerControlMixin:
                 receiver_id=first.receiver_id,
                 installed_version=first.installed_version,
                 state="POISONED",
-                target_digest=None,
                 detail="engine-local ranks diverged after ModelExpress mutation",
             )
         if failures:
@@ -902,7 +900,6 @@ class TokenizerControlMixin:
                 receiver_id=first.receiver_id,
                 installed_version=first.installed_version,
                 state=first.state,
-                target_digest=first.target_digest,
                 detail="engine-local ranks disagree on ModelExpress target identity",
             )
         result = results[0]

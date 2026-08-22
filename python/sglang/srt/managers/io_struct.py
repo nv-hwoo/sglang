@@ -1828,7 +1828,6 @@ class ModelExpressWeightUpdateReqOutput(BaseReq, kw_only=True):
     receiver_id: str
     installed_version: Optional[str]
     state: Optional[str]
-    target_digest: Optional[str] = None
     detail: str = ""
     metrics: Dict[str, float] = msgspec.field(default_factory=dict)
 

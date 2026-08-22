@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import socket
 import time
 import traceback
 from contextlib import contextmanager
@@ -89,7 +88,11 @@ class SchedulerWeightUpdaterManager:
     is_fully_idle: Callable[..., bool]
     scheduler: Optional[Any] = None
     metrics_collector: Optional[Any] = None
-    modelexpress_receiver: Any = field(default=None, init=False)
+    modelexpress_generator: Any = field(default=None, init=False)
+    modelexpress_staged: Any = field(default=None, init=False)
+    modelexpress_installed_version: Optional[str] = field(default=None, init=False)
+    modelexpress_state: Optional[str] = field(default=None, init=False)
+    modelexpress_detail: str = field(default="", init=False)
     offload_tags: set = field(default_factory=set)
     stashed_model_static_state: Any = None
 
@@ -135,56 +138,65 @@ class SchedulerWeightUpdaterManager:
                 success=success, message=message, num_paused_requests=0
             )
 
-    @staticmethod
     def _modelexpress_output(
-        value,
-        success: Optional[bool] = None,
+        self,
+        *,
+        success: bool = True,
+        detail: Optional[str] = None,
         metrics: Optional[Dict[str, float]] = None,
-    ):
-        state = getattr(value, "state", None)
+    ) -> ModelExpressWeightUpdateReqOutput:
+        generator = self._modelexpress_generator()
         return ModelExpressWeightUpdateReqOutput(
-            success=(getattr(value, "success", True) if success is None else success),
-            receiver_id=value.receiver_id,
-            installed_version=value.installed_version,
-            state=state.name if state is not None else None,
-            target_digest=getattr(value, "target_digest", None),
-            detail=getattr(value, "detail", ""),
+            success=success,
+            receiver_id=generator.worker_id,
+            installed_version=self.modelexpress_installed_version,
+            state=self.modelexpress_state,
+            detail=self.modelexpress_detail if detail is None else detail,
             metrics=metrics or {},
         )
 
-    def _modelexpress_receiver(self):
+    def _modelexpress_generator(self):
         if self.draft_worker is not None:
             raise RuntimeError("ModelExpress does not support draft models")
-        if self.modelexpress_receiver is None:
-            from modelexpress.refit.factory import (
-                RolloutBackend,
-                build_delta_receiver,
+        if self.modelexpress_generator is None:
+            from modelexpress_rl import (
+                ModelExpressGeneratorClient,
+                ModelExpressGeneratorConfig,
+                S3GeneratorConfig,
+                SglangGeneratorContext,
+                WeightPayloadFormat,
             )
-            from modelexpress.refit.receiver import ReceiverConfig
 
             model_runner = self.tp_worker.model_runner
             args = model_runner.server_args
-            rank = (
-                torch.distributed.get_rank()
-                if torch.distributed.is_initialized()
-                else 0
+            checkpoint, _, _ = model_runner.loader._prepare_weights(
+                model_runner.model_config.model_path,
+                model_runner.model_config.revision,
+                False,
             )
-            receiver = build_delta_receiver(
-                RolloutBackend.SGLANG,
-                config=ReceiverConfig(
-                    model_id=args.modelexpress_model_id,
-                    catalog_endpoint=args.modelexpress_catalog_endpoint,
-                    initial_version=args.modelexpress_initial_version,
-                    preparation_cache_dir=args.modelexpress_preparation_cache_dir,
-                    ready_timeout_seconds=args.modelexpress_ready_timeout_seconds,
-                    s3_endpoint_url=args.modelexpress_delta_s3_endpoint,
-                ),
-                receiver_id=f"{socket.gethostname()}:{rank}",
-                model_runner=model_runner,
+            self.modelexpress_generator = ModelExpressGeneratorClient.initialize(
+                ModelExpressGeneratorConfig(
+                    engine_context=SglangGeneratorContext(model_runner),
+                    model_name=args.modelexpress_model_name,
+                    payload_format=WeightPayloadFormat.XOR_DELTA,
+                    server_url=args.modelexpress_server_url,
+                    s3=S3GeneratorConfig(
+                        initial_base_version_id=(
+                            args.modelexpress_initial_base_version_id
+                        ),
+                        launch_checkpoint=checkpoint,
+                        preparation_cache_dir=(
+                            args.modelexpress_preparation_cache_dir
+                        ),
+                        endpoint_url=args.modelexpress_s3_endpoint_url,
+                    ),
+                )
             )
-            receiver.initialize()
-            self.modelexpress_receiver = receiver
-        return self.modelexpress_receiver
+            self.modelexpress_installed_version = (
+                args.modelexpress_initial_base_version_id
+            )
+            self.modelexpress_state = "VERIFIED"
+        return self.modelexpress_generator
 
     def _modelexpress_tp_agreement(
         self,
@@ -199,7 +211,7 @@ class SchedulerWeightUpdaterManager:
         results: List[ModelExpressWeightUpdateReqOutput] = [output] * world_size
         torch.distributed.all_gather_object(results, output, group=self.tp_cpu_group)
         identities = {
-            (item.success, item.installed_version, item.state, item.target_digest)
+            (item.success, item.installed_version, item.state)
             for item in results
         }
         if len(identities) == 1:
@@ -212,9 +224,9 @@ class SchedulerWeightUpdaterManager:
         if mutation_phase and any(
             item.success or item.state == "POISONED" for item in results
         ):
-            return self._modelexpress_output(
-                self._modelexpress_receiver().mark_poisoned(detail)
-            )
+            self.modelexpress_state = "POISONED"
+            self.modelexpress_detail = detail
+            return self._modelexpress_output(success=False)
         failures = [item for item in results if not item.success]
         if failures:
             return failures[0]
@@ -223,88 +235,115 @@ class SchedulerWeightUpdaterManager:
             receiver_id=output.receiver_id,
             installed_version=output.installed_version,
             state=output.state,
-            target_digest=output.target_digest,
             detail=detail,
         )
 
     def prepare_weights_from_modelexpress(
         self, recv_req: PrepareWeightsFromModelExpressReqInput
     ):
-        receiver = self._modelexpress_receiver()
+        from modelexpress_rl import WeightVersionRef
+        from modelexpress_rl.inference.receiver import PoisonedCheckpointError
+
+        generator = self._modelexpress_generator()
+        if self.modelexpress_state == "POISONED":
+            return self._modelexpress_tp_agreement(
+                self._modelexpress_output(success=False),
+                mutation_phase=False,
+            )
         try:
-            receiver.start_weight_update(recv_req.target_version)
-            status = receiver.status()
-            output = ModelExpressWeightUpdateReqOutput(
-                success=True,
-                receiver_id=status.receiver_id,
-                installed_version=status.installed_version,
-                state=status.state.name if status.state is not None else None,
-                target_digest=receiver.prepared_identity.target_digest,
-                metrics=receiver.pop_metrics(),
+            if self.modelexpress_staged is None:
+                self.modelexpress_staged = generator.stage_weight(
+                    version=WeightVersionRef(recv_req.target_version)
+                )
+            elif self.modelexpress_staged.version_id != recv_req.target_version:
+                raise RuntimeError("another ModelExpress target is already prepared")
+            self.modelexpress_state = "VERIFIED"
+            self.modelexpress_detail = ""
+            output = self._modelexpress_output(
+                metrics=self.modelexpress_staged.metrics
             )
         except Exception as exc:
-            status = receiver.status()
-            output = ModelExpressWeightUpdateReqOutput(
-                success=False,
-                receiver_id=status.receiver_id,
-                installed_version=status.installed_version,
-                state=status.state.name if status.state is not None else None,
-                detail=str(exc),
+            self.modelexpress_state = (
+                "POISONED" if isinstance(exc, PoisonedCheckpointError) else "FAILED"
             )
+            self.modelexpress_detail = str(exc)
+            output = self._modelexpress_output(success=False)
         return self._modelexpress_tp_agreement(output, mutation_phase=False)
 
     def update_weights_from_modelexpress(
         self, recv_req: UpdateWeightsFromModelExpressReqInput
     ):
-        receiver = self._modelexpress_receiver()
-        status = receiver.status()
-        prepared = receiver.prepared_identity
-        if prepared is None or prepared.target_version != recv_req.target_version:
-            precheck = ModelExpressWeightUpdateReqOutput(
+        generator = self._modelexpress_generator()
+        staged = self.modelexpress_staged
+        if staged is None or staged.version_id != recv_req.target_version:
+            precheck = self._modelexpress_output(
                 success=False,
-                receiver_id=status.receiver_id,
-                installed_version=status.installed_version,
-                state=status.state.name if status.state is not None else None,
                 detail="requested target is not prepared",
             )
         else:
-            precheck = ModelExpressWeightUpdateReqOutput(
-                success=True,
-                receiver_id=status.receiver_id,
-                installed_version=status.installed_version,
-                state=status.state.name if status.state is not None else None,
-                target_digest=receiver.prepared_identity.target_digest,
-            )
+            precheck = self._modelexpress_output()
         precheck = self._modelexpress_tp_agreement(precheck, mutation_phase=False)
         if not precheck.success:
             return precheck
 
-        result = receiver.update_weights()
-        if result.success:
+        metrics = {}
+        success = False
+        try:
+            metrics = generator.apply_weight(staged)
+            success = True
+        except Exception as exc:
+            if staged.applied:
+                self.modelexpress_installed_version = staged.version_id
+                self.modelexpress_state = "VERIFIED"
+                success = True
+            else:
+                self.modelexpress_state = (
+                    "POISONED" if getattr(exc, "mutation_started", False) else "FAILED"
+                )
+            self.modelexpress_detail = str(exc)
+        finally:
+            try:
+                staged.release()
+            except Exception as exc:
+                suffix = f"staged cleanup failed: {exc}"
+                self.modelexpress_detail = (
+                    f"{self.modelexpress_detail}; {suffix}"
+                    if self.modelexpress_detail
+                    else suffix
+                )
+            finally:
+                self.modelexpress_staged = None
+
+        if success:
+            self.modelexpress_installed_version = staged.version_id
+            self.modelexpress_state = "VERIFIED"
             try:
                 cache_valid = self.flush_cache(empty_cache=False)
             except Exception as exc:
-                result = receiver.mark_poisoned(
+                self.modelexpress_state = "POISONED"
+                self.modelexpress_detail = (
                     f"cache invalidation raised after install: {exc}"
                 )
+                success = False
             else:
                 if not cache_valid:
-                    result = receiver.mark_poisoned(
-                        "cache invalidation failed after install"
-                    )
+                    self.modelexpress_state = "POISONED"
+                    self.modelexpress_detail = "cache invalidation failed after install"
+                    success = False
         return self._modelexpress_tp_agreement(
-            self._modelexpress_output(result, metrics=receiver.pop_metrics()),
+            self._modelexpress_output(success=success, metrics=metrics),
             mutation_phase=True,
         )
 
     def mark_modelexpress_poisoned(self, recv_req: MarkModelExpressPoisonedReqInput):
-        result = self._modelexpress_receiver().mark_poisoned(recv_req.detail)
+        self.modelexpress_state = "POISONED"
+        self.modelexpress_detail = recv_req.detail
         return self._modelexpress_tp_agreement(
-            self._modelexpress_output(result), mutation_phase=True
+            self._modelexpress_output(success=False), mutation_phase=True
         )
 
     def get_modelexpress_status(self, _recv_req: GetModelExpressStatusReqInput):
-        output = self._modelexpress_output(self._modelexpress_receiver().status())
+        output = self._modelexpress_output()
         return self._modelexpress_tp_agreement(output, mutation_phase=False)
 
     def init_weights_update_group(self, recv_req: InitWeightsUpdateGroupReqInput):

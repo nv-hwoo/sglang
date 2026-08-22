@@ -1855,6 +1855,10 @@ class Scheduler(
         destroy_global_indexer_capturer()
 
         rank_consensus_checker.shutdown()
+        generator = self.weight_updater.modelexpress_generator
+        self.weight_updater.modelexpress_generator = None
+        if generator is not None:
+            generator.close()
 
     def run_event_loop(self) -> None:
         """Run the scheduler's event loop.

@@ -330,21 +330,18 @@ class Model:
         Optional[str],
         'JSON config for ModelExpress P2P weight loading. Keys: "url" (optional gRPC host:port override), "transport" ("nixl" or "transfer_engine"). Example: \'{"url": "localhost:8001", "transport": "nixl"}\'',
     ] = None
-    modelexpress_delta_s3_endpoint: A[
+    modelexpress_s3_endpoint_url: A[
         Optional[str], "S3-compatible endpoint for ModelExpress canonical objects."
     ] = None
-    modelexpress_catalog_endpoint: A[
-        Optional[str], "ModelExpress revision catalog gRPC endpoint."
+    modelexpress_server_url: A[
+        Optional[str], "ModelExpress RefitService gRPC endpoint."
     ] = None
-    modelexpress_model_id: A[
-        Optional[str], "Stable ModelExpress model revision lineage."
+    modelexpress_model_name: A[
+        Optional[str], "ModelExpress Refit model name."
     ] = None
-    modelexpress_initial_version: A[
-        Optional[str], "Exact ModelExpress version loaded at engine startup."
+    modelexpress_initial_base_version_id: A[
+        Optional[str], "Exact Refit base version loaded at engine startup."
     ] = None
-    modelexpress_ready_timeout_seconds: A[
-        float, "Seconds to wait for the launch revision to become ready."
-    ] = 600.0
     modelexpress_preparation_cache_dir: A[
         Optional[str],
         "Host-local, model-ID-namespaced exact-base and prepared-target directory.",

@@ -19,9 +19,6 @@ from sglang.srt.managers.io_struct import (  # noqa: E402
     PrepareWeightsFromModelExpressReqInput,
     UpdateWeightsFromModelExpressReqInput,
 )
-from sglang.srt.managers.scheduler_components import (  # noqa: E402
-    weight_updater as weight_updater_module,
-)
 from sglang.srt.managers.scheduler_components.weight_updater import (  # noqa: E402
     SchedulerWeightUpdaterManager,
 )
@@ -33,118 +30,118 @@ from sglang.test.ci.ci_register import register_cpu_ci  # noqa: E402
 register_cpu_ci(est_time=15, suite="base-a-test-cpu")
 
 
-class Receiver:
+@pytest.fixture(autouse=True)
+def modelexpress_modules(monkeypatch):
+    class WeightVersionRef:
+        def __init__(self, version_id):
+            self.version_id = version_id
+
+    class PoisonedCheckpointError(Exception):
+        pass
+
+    modelexpress_rl = ModuleType("modelexpress_rl")
+    modelexpress_rl.__path__ = []
+    modelexpress_rl.WeightVersionRef = WeightVersionRef
+    inference = ModuleType("modelexpress_rl.inference")
+    inference.__path__ = []
+    receiver = ModuleType("modelexpress_rl.inference.receiver")
+    receiver.PoisonedCheckpointError = PoisonedCheckpointError
+    monkeypatch.setitem(sys.modules, "modelexpress_rl", modelexpress_rl)
+    monkeypatch.setitem(sys.modules, "modelexpress_rl.inference", inference)
+    monkeypatch.setitem(sys.modules, "modelexpress_rl.inference.receiver", receiver)
+    return modelexpress_rl
+
+
+class Staged:
+    def __init__(self, version_id):
+        self.version_id = version_id
+        self.metrics = {"perf/mx_receive_prepare_time": 2.0}
+        self.applied = False
+        self.released = 0
+        self.release_error = None
+
+    def release(self):
+        self.released += 1
+        if self.release_error is not None:
+            raise self.release_error
+
+
+class Generator:
     def __init__(self):
-        self.initialized = 0
-        self.prepared = []
-        self.metrics = [
-            {"perf/mx_receive_prepare_time": 2.0},
-            {"perf/mx_receive_install_time": 3.0},
-        ]
+        self.worker_id = "generator-a"
+        self.staged = []
+        self.applied = []
+        self.closed = 0
 
-    def initialize(self):
-        self.initialized += 1
+    def stage_weight(self, *, version):
+        staged = Staged(version.version_id)
+        self.staged.append(staged)
+        return staged
 
-    def start_weight_update(self, version):
-        self.prepared.append(version)
+    def apply_weight(self, staged):
+        staged.applied = True
+        self.applied.append(staged)
+        return {"perf/mx_receive_install_time": 3.0}
 
-    def pop_metrics(self):
-        return self.metrics.pop(0)
-
-    @property
-    def prepared_identity(self):
-        # Mirrors ModelExpressWeightReceiver: None until a target is prepared.
-        if not self.prepared:
-            return None
-        return SimpleNamespace(
-            target_version=self.prepared[-1], target_digest="sha256:target"
-        )
-
-    def update_weights(self):
-        return SimpleNamespace(
-            success=True,
-            receiver_id="tp0",
-            installed_version="2",
-            state=SimpleNamespace(name="VERIFIED"),
-            target_digest="sha256:target",
-            detail="",
-        )
-
-    def status(self):
-        return SimpleNamespace(
-            receiver_id="tp0",
-            installed_version="2",
-            state=SimpleNamespace(name="VERIFIED"),
-            detail="",
-        )
-
-    def mark_poisoned(self, detail):
-        return SimpleNamespace(
-            success=False,
-            receiver_id="tp0",
-            installed_version="2",
-            state=SimpleNamespace(name="POISONED"),
-            target_digest=None,
-            detail=detail,
-        )
+    def close(self):
+        self.closed += 1
 
 
-def manager(receiver):
+def manager(generator):
     value = object.__new__(SchedulerWeightUpdaterManager)
     value.tp_worker = SimpleNamespace(
         model_runner=SimpleNamespace(
+            loader=SimpleNamespace(
+                _prepare_weights=lambda *_args: ("/models/launch", None, None)
+            ),
+            model_config=SimpleNamespace(model_path="model", revision=None),
             server_args=SimpleNamespace(
-                modelexpress_model_id="model",
-                modelexpress_catalog_endpoint="mx:8001",
-                modelexpress_initial_version="0",
+                modelexpress_model_name="model",
+                modelexpress_server_url="mx:8001",
+                modelexpress_initial_base_version_id="base-a",
                 modelexpress_preparation_cache_dir="/tmp/mx-cache",
-                modelexpress_ready_timeout_seconds=123,
-                modelexpress_delta_s3_endpoint="http://minio:9000",
+                modelexpress_s3_endpoint_url="http://minio:9000",
             )
         )
     )
-    value.modelexpress_receiver = receiver
+    value.modelexpress_generator = generator
+    value.modelexpress_staged = None
+    value.modelexpress_installed_version = "base-a" if generator is not None else None
+    value.modelexpress_state = "VERIFIED" if generator is not None else None
+    value.modelexpress_detail = ""
     value.draft_worker = None
     value.tp_cpu_group = object()
     value.flush_cache = lambda **_kwargs: True
     return value
 
 
-def test_receiver_is_built_once_on_first_manager_access(monkeypatch):
-    receiver = Receiver()
+def test_generator_client_is_built_once_on_first_manager_access(
+    modelexpress_modules,
+):
+    generator = Generator()
     updater = manager(None)
     built = []
 
-    def build(backend, **kwargs):
-        built.append((backend, kwargs))
-        return receiver
-
-    class ReceiverConfig(SimpleNamespace):
+    class Config(SimpleNamespace):
         def __init__(self, **values):
             super().__init__(**values)
 
-    class RolloutBackend:
-        SGLANG = "sglang"
+    class ModelExpressGeneratorClient:
+        @staticmethod
+        def initialize(config):
+            built.append(config)
+            return generator
 
-    modelexpress = ModuleType("modelexpress")
-    modelexpress.__path__ = []
-    refit = ModuleType("modelexpress.refit")
-    refit.__path__ = []
-    factory_module = ModuleType("modelexpress.refit.factory")
-    factory_module.RolloutBackend = RolloutBackend
-    factory_module.build_delta_receiver = build
-    receiver_module = ModuleType("modelexpress.refit.receiver")
-    receiver_module.ReceiverConfig = ReceiverConfig
-    monkeypatch.setitem(sys.modules, "modelexpress", modelexpress)
-    monkeypatch.setitem(sys.modules, "modelexpress.refit", refit)
-    monkeypatch.setitem(sys.modules, "modelexpress.refit.factory", factory_module)
-    monkeypatch.setitem(sys.modules, "modelexpress.refit.receiver", receiver_module)
-    monkeypatch.setattr(
-        weight_updater_module,
-        "socket",
-        SimpleNamespace(gethostname=lambda: "host"),
-        raising=False,
+    class WeightPayloadFormat:
+        XOR_DELTA = "xor-delta"
+
+    modelexpress_modules.ModelExpressGeneratorClient = ModelExpressGeneratorClient
+    modelexpress_modules.ModelExpressGeneratorConfig = Config
+    modelexpress_modules.S3GeneratorConfig = Config
+    modelexpress_modules.SglangGeneratorContext = lambda model_runner: SimpleNamespace(
+        model_runner=model_runner
     )
+    modelexpress_modules.WeightPayloadFormat = WeightPayloadFormat
 
     status = updater.get_modelexpress_status(GetModelExpressStatusReqInput())
     prepared = updater.prepare_weights_from_modelexpress(
@@ -154,25 +151,24 @@ def test_receiver_is_built_once_on_first_manager_access(monkeypatch):
     assert status.state == "VERIFIED"
     assert prepared.success is True
     assert len(built) == 1
-    backend, kwargs = built[0]
-    assert backend == RolloutBackend.SGLANG
-    assert kwargs["model_runner"] is updater.tp_worker.model_runner
-    assert kwargs["receiver_id"] == "host:0"
-    assert vars(kwargs["config"]) == {
-        "model_id": "model",
-        "catalog_endpoint": "mx:8001",
-        "initial_version": "0",
+    config = built[0]
+    assert config.engine_context.model_runner is updater.tp_worker.model_runner
+    assert config.model_name == "model"
+    assert config.payload_format == WeightPayloadFormat.XOR_DELTA
+    assert config.server_url == "mx:8001"
+    assert vars(config.s3) == {
+        "endpoint_url": "http://minio:9000",
+        "initial_base_version_id": "base-a",
+        "launch_checkpoint": "/models/launch",
         "preparation_cache_dir": "/tmp/mx-cache",
-        "ready_timeout_seconds": 123,
-        "s3_endpoint_url": "http://minio:9000",
     }
-    assert receiver.initialized == 1
-    assert updater.modelexpress_receiver is receiver
+    assert updater.modelexpress_generator is generator
+    assert generator.staged[0].version_id == "2"
 
 
-def test_scheduler_handlers_are_thin_receiver_forwarders():
-    receiver = Receiver()
-    updater = manager(receiver)
+def test_scheduler_handlers_drive_generator_client_stage_and_apply():
+    generator = Generator()
+    updater = manager(generator)
 
     prepared = updater.prepare_weights_from_modelexpress(
         PrepareWeightsFromModelExpressReqInput(target_version="2")
@@ -182,12 +178,13 @@ def test_scheduler_handlers_are_thin_receiver_forwarders():
     )
     status = updater.get_modelexpress_status(GetModelExpressStatusReqInput())
 
-    assert receiver.prepared == ["2"]
+    assert [item.version_id for item in generator.staged] == ["2"]
+    assert generator.applied == generator.staged
+    assert generator.staged[0].released == 1
     assert prepared.success is True
     assert prepared.metrics == {"perf/mx_receive_prepare_time": 2.0}
     assert installed.success is True
     assert installed.installed_version == "2"
-    assert installed.target_digest == "sha256:target"
     assert installed.metrics == {"perf/mx_receive_install_time": 3.0}
     assert status.state == "VERIFIED"
 
@@ -198,7 +195,6 @@ def test_receive_metrics_merge_by_max_latency():
         receiver_id="dp0",
         installed_version="2",
         state="VERIFIED",
-        target_digest="sha256:target",
         metrics={"perf/mx_receive_prepare_time": 2.0},
     )
     second = ModelExpressWeightUpdateReqOutput(
@@ -206,7 +202,6 @@ def test_receive_metrics_merge_by_max_latency():
         receiver_id="dp1",
         installed_version="2",
         state="VERIFIED",
-        target_digest="sha256:target",
         metrics={"perf/mx_receive_prepare_time": 3.0},
     )
 
@@ -218,8 +213,8 @@ def test_receive_metrics_merge_by_max_latency():
 
 
 def test_installing_an_unprepared_target_is_refused_without_mutating():
-    receiver = Receiver()
-    updater = manager(receiver)
+    generator = Generator()
+    updater = manager(generator)
 
     unprepared = updater.update_weights_from_modelexpress(
         UpdateWeightsFromModelExpressReqInput(target_version="2")
@@ -237,9 +232,11 @@ def test_installing_an_unprepared_target_is_refused_without_mutating():
 
 
 def test_cache_flush_exception_becomes_poisoned_result():
-    receiver = Receiver()
-    updater = manager(receiver)
-    receiver.start_weight_update("2")
+    generator = Generator()
+    updater = manager(generator)
+    updater.prepare_weights_from_modelexpress(
+        PrepareWeightsFromModelExpressReqInput(target_version="2")
+    )
 
     def fail_flush(**_kwargs):
         raise RuntimeError("cache flush exploded")
@@ -255,15 +252,31 @@ def test_cache_flush_exception_becomes_poisoned_result():
     assert "cache invalidation raised after install" in result.detail
 
 
+def test_staged_cleanup_failure_does_not_skip_update_result():
+    generator = Generator()
+    updater = manager(generator)
+    updater.prepare_weights_from_modelexpress(
+        PrepareWeightsFromModelExpressReqInput(target_version="2")
+    )
+    updater.modelexpress_staged.release_error = RuntimeError("lease unavailable")
+
+    result = updater.update_weights_from_modelexpress(
+        UpdateWeightsFromModelExpressReqInput(target_version="2")
+    )
+
+    assert result.success is True
+    assert "staged cleanup failed: lease unavailable" in result.detail
+    assert updater.modelexpress_staged is None
+
+
 def test_tp_disagreement_after_mutation_poisoned_the_whole_engine(monkeypatch):
-    receiver = Receiver()
-    updater = manager(receiver)
+    generator = Generator()
+    updater = manager(generator)
     local = ModelExpressWeightUpdateReqOutput(
         success=True,
         receiver_id="tp0",
         installed_version="2",
         state="VERIFIED",
-        target_digest="sha256:target",
     )
     failed = ModelExpressWeightUpdateReqOutput(
         success=False,
@@ -292,7 +305,6 @@ def test_dp_disagreement_after_mutation_blocks_serving_as_poisoned():
         receiver_id="dp0",
         installed_version="2",
         state="VERIFIED",
-        target_digest="sha256:target",
     )
     failed = ModelExpressWeightUpdateReqOutput(
         success=False,
@@ -316,7 +328,6 @@ def test_dp_divergence_fanout_marks_underlying_receivers_poisoned():
         receiver_id="dp0",
         installed_version="2",
         state="VERIFIED",
-        target_digest="sha256:target",
     )
     failed = ModelExpressWeightUpdateReqOutput(
         success=False,
