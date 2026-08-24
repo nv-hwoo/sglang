@@ -111,6 +111,14 @@ class SchedulerWeightUpdaterManager:
                     time.perf_counter() - t0, source
                 )
 
+    def _observe_modelexpress_metrics(self, metrics: Dict[str, float]) -> None:
+        if self.metrics_collector is None:
+            return
+        try:
+            self.metrics_collector.observe_modelexpress_metrics(metrics)
+        except Exception:
+            logger.warning("Failed to record ModelExpress metrics", exc_info=True)
+
     def flush_cache_after_weight_update(self, recv_req) -> None:
         if recv_req.flush_cache:
             flush_cache_success = self.flush_cache(
@@ -185,9 +193,7 @@ class SchedulerWeightUpdaterManager:
                             args.modelexpress_initial_base_version_id
                         ),
                         launch_checkpoint=checkpoint,
-                        preparation_cache_dir=(
-                            args.modelexpress_preparation_cache_dir
-                        ),
+                        preparation_cache_dir=(args.modelexpress_preparation_cache_dir),
                         endpoint_url=args.modelexpress_s3_endpoint_url,
                     ),
                 )
@@ -211,8 +217,7 @@ class SchedulerWeightUpdaterManager:
         results: List[ModelExpressWeightUpdateReqOutput] = [output] * world_size
         torch.distributed.all_gather_object(results, output, group=self.tp_cpu_group)
         identities = {
-            (item.success, item.installed_version, item.state)
-            for item in results
+            (item.success, item.installed_version, item.state) for item in results
         }
         if len(identities) == 1:
             output.metrics = {
@@ -242,7 +247,6 @@ class SchedulerWeightUpdaterManager:
         self, recv_req: PrepareWeightsFromModelExpressReqInput
     ):
         from modelexpress_rl import WeightVersionRef
-        from modelexpress_rl.inference.receiver import PoisonedCheckpointError
 
         generator = self._modelexpress_generator()
         if self.modelexpress_state == "POISONED":
@@ -259,13 +263,11 @@ class SchedulerWeightUpdaterManager:
                 raise RuntimeError("another ModelExpress target is already prepared")
             self.modelexpress_state = "VERIFIED"
             self.modelexpress_detail = ""
-            output = self._modelexpress_output(
-                metrics=self.modelexpress_staged.metrics
-            )
+            metrics = self.modelexpress_staged.metrics
+            self._observe_modelexpress_metrics(metrics)
+            output = self._modelexpress_output(metrics=metrics)
         except Exception as exc:
-            self.modelexpress_state = (
-                "POISONED" if isinstance(exc, PoisonedCheckpointError) else "FAILED"
-            )
+            self.modelexpress_state = "FAILED"
             self.modelexpress_detail = str(exc)
             output = self._modelexpress_output(success=False)
         return self._modelexpress_tp_agreement(output, mutation_phase=False)
@@ -290,6 +292,7 @@ class SchedulerWeightUpdaterManager:
         success = False
         try:
             metrics = generator.apply_weight(staged)
+            self._observe_modelexpress_metrics(metrics)
             success = True
         except Exception as exc:
             if staged.applied:
@@ -297,9 +300,7 @@ class SchedulerWeightUpdaterManager:
                 self.modelexpress_state = "VERIFIED"
                 success = True
             else:
-                self.modelexpress_state = (
-                    "POISONED" if getattr(exc, "mutation_started", False) else "FAILED"
-                )
+                self.modelexpress_state = "FAILED"
             self.modelexpress_detail = str(exc)
         finally:
             try:

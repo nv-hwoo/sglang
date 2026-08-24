@@ -3,7 +3,7 @@
 import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import torch
@@ -25,6 +25,9 @@ from sglang.srt.managers.scheduler_components.weight_updater import (  # noqa: E
 from sglang.srt.managers.tokenizer_control_mixin import (  # noqa: E402
     TokenizerControlMixin,
 )
+from sglang.srt.observability.metrics_collector import (  # noqa: E402
+    SchedulerMetricsCollector,
+)
 from sglang.test.ci.ci_register import register_cpu_ci  # noqa: E402
 
 register_cpu_ci(est_time=15, suite="base-a-test-cpu")
@@ -36,19 +39,10 @@ def modelexpress_modules(monkeypatch):
         def __init__(self, version_id):
             self.version_id = version_id
 
-    class PoisonedCheckpointError(Exception):
-        pass
-
     modelexpress_rl = ModuleType("modelexpress_rl")
     modelexpress_rl.__path__ = []
     modelexpress_rl.WeightVersionRef = WeightVersionRef
-    inference = ModuleType("modelexpress_rl.inference")
-    inference.__path__ = []
-    receiver = ModuleType("modelexpress_rl.inference.receiver")
-    receiver.PoisonedCheckpointError = PoisonedCheckpointError
     monkeypatch.setitem(sys.modules, "modelexpress_rl", modelexpress_rl)
-    monkeypatch.setitem(sys.modules, "modelexpress_rl.inference", inference)
-    monkeypatch.setitem(sys.modules, "modelexpress_rl.inference.receiver", receiver)
     return modelexpress_rl
 
 
@@ -72,13 +66,19 @@ class Generator:
         self.staged = []
         self.applied = []
         self.closed = 0
+        self.stage_error = None
+        self.apply_error = None
 
     def stage_weight(self, *, version):
+        if self.stage_error is not None:
+            raise self.stage_error
         staged = Staged(version.version_id)
         self.staged.append(staged)
         return staged
 
     def apply_weight(self, staged):
+        if self.apply_error is not None:
+            raise self.apply_error
         staged.applied = True
         self.applied.append(staged)
         return {"perf/mx_receive_install_time": 3.0}
@@ -101,7 +101,7 @@ def manager(generator):
                 modelexpress_initial_base_version_id="base-a",
                 modelexpress_preparation_cache_dir="/tmp/mx-cache",
                 modelexpress_s3_endpoint_url="http://minio:9000",
-            )
+            ),
         )
     )
     value.modelexpress_generator = generator
@@ -112,6 +112,7 @@ def manager(generator):
     value.draft_worker = None
     value.tp_cpu_group = object()
     value.flush_cache = lambda **_kwargs: True
+    value.metrics_collector = None
     return value
 
 
@@ -169,6 +170,7 @@ def test_generator_client_is_built_once_on_first_manager_access(
 def test_scheduler_handlers_drive_generator_client_stage_and_apply():
     generator = Generator()
     updater = manager(generator)
+    updater.metrics_collector = MagicMock()
 
     prepared = updater.prepare_weights_from_modelexpress(
         PrepareWeightsFromModelExpressReqInput(target_version="2")
@@ -187,6 +189,79 @@ def test_scheduler_handlers_drive_generator_client_stage_and_apply():
     assert installed.installed_version == "2"
     assert installed.metrics == {"perf/mx_receive_install_time": 3.0}
     assert status.state == "VERIFIED"
+    assert updater.metrics_collector.observe_modelexpress_metrics.call_args_list == [
+        call({"perf/mx_receive_prepare_time": 2.0}),
+        call({"perf/mx_receive_install_time": 3.0}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("metric_name", "phase"),
+    [
+        ("perf/mx_receive_delta_index_download", "delta_index_download"),
+        ("perf/mx_receive_delta_apply", "delta_apply"),
+        ("perf/mx_receive_prepare_time", "prepare"),
+        ("perf/mx_receive_install_time", "install"),
+    ],
+)
+def test_modelexpress_metrics_use_bounded_prometheus_phases(metric_name, phase):
+    collector = object.__new__(SchedulerMetricsCollector)
+    collector.labels = {"model_name": "model"}
+    collector.modelexpress_receive_duration_seconds = MagicMock()
+
+    collector.observe_modelexpress_metrics(
+        {metric_name: 1.25, "unknown_modelexpress_metric": 2.0}
+    )
+
+    gauge = collector.modelexpress_receive_duration_seconds
+    gauge.labels.assert_called_once_with(model_name="model", phase=phase)
+    gauge.labels.return_value.set.assert_called_once_with(1.25)
+
+
+def test_metrics_failure_does_not_fail_modelexpress_weight_update():
+    updater = manager(Generator())
+    updater.metrics_collector = MagicMock()
+    updater.metrics_collector.observe_modelexpress_metrics.side_effect = RuntimeError(
+        "metrics unavailable"
+    )
+
+    prepared = updater.prepare_weights_from_modelexpress(
+        PrepareWeightsFromModelExpressReqInput(target_version="2")
+    )
+    installed = updater.update_weights_from_modelexpress(
+        UpdateWeightsFromModelExpressReqInput(target_version="2")
+    )
+
+    assert prepared.success is True
+    assert installed.success is True
+
+
+def test_prepare_error_becomes_failed_result():
+    generator = Generator()
+    generator.stage_error = RuntimeError("prepare failed")
+    result = manager(generator).prepare_weights_from_modelexpress(
+        PrepareWeightsFromModelExpressReqInput(target_version="2")
+    )
+
+    assert result.success is False
+    assert result.state == "FAILED"
+    assert result.detail == "prepare failed"
+
+
+def test_apply_error_becomes_failed_result():
+    generator = Generator()
+    generator.apply_error = RuntimeError("apply failed")
+    updater = manager(generator)
+    updater.prepare_weights_from_modelexpress(
+        PrepareWeightsFromModelExpressReqInput(target_version="2")
+    )
+    result = updater.update_weights_from_modelexpress(
+        UpdateWeightsFromModelExpressReqInput(target_version="2")
+    )
+
+    assert result.success is False
+    assert result.state == "FAILED"
+    assert result.detail == "apply failed"
 
 
 def test_receive_metrics_merge_by_max_latency():

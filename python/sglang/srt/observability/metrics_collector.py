@@ -50,6 +50,13 @@ SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STAT
 
 logger = logging.getLogger(__name__)
 
+_MODELEXPRESS_RECEIVE_DURATION_PHASES = {
+    "perf/mx_receive_delta_index_download": "delta_index_download",
+    "perf/mx_receive_delta_apply": "delta_apply",
+    "perf/mx_receive_prepare_time": "prepare",
+    "perf/mx_receive_install_time": "install",
+}
+
 
 @dataclass
 class QueueCount:
@@ -417,6 +424,16 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
                 "changes(...[<range>]) > 0 — no separate counter needed."
             ),
             labelnames=[*labels.keys(), "source"],
+            multiprocess_mode="mostrecent",
+        )
+        self.modelexpress_receive_duration_seconds = Gauge(
+            name="sglang:modelexpress_receive_duration_seconds",
+            documentation=(
+                "Duration of the most recent ModelExpress receive phase on this "
+                "scheduler rank (seconds). `phase` is one of: "
+                "delta_index_download, delta_apply, prepare, install."
+            ),
+            labelnames=[*labels.keys(), "phase"],
             multiprocess_mode="mostrecent",
         )
 
@@ -1221,6 +1238,14 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
         self.weight_load_duration_seconds.labels(**self.labels, source=source).set(
             duration_seconds
         )
+
+    def observe_modelexpress_metrics(self, metrics: Mapping[str, float]) -> None:
+        for metric_name, phase in _MODELEXPRESS_RECEIVE_DURATION_PHASES.items():
+            duration_seconds = metrics.get(metric_name)
+            if duration_seconds is not None:
+                self.modelexpress_receive_duration_seconds.labels(
+                    **self.labels, phase=phase
+                ).set(duration_seconds)
 
     def observe_prefill_delayer_outcome(
         self,
