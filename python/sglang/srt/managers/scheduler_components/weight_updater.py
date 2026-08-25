@@ -172,7 +172,6 @@ class SchedulerWeightUpdaterManager:
                 ModelExpressGeneratorConfig,
                 S3GeneratorConfig,
                 SglangGeneratorContext,
-                WeightPayloadFormat,
             )
 
             model_runner = self.tp_worker.model_runner
@@ -186,7 +185,6 @@ class SchedulerWeightUpdaterManager:
                 ModelExpressGeneratorConfig(
                     engine_context=SglangGeneratorContext(model_runner),
                     model_name=args.modelexpress_model_name,
-                    payload_format=WeightPayloadFormat.XOR_DELTA,
                     server_url=args.modelexpress_server_url,
                     s3=S3GeneratorConfig(
                         initial_base_version_id=(

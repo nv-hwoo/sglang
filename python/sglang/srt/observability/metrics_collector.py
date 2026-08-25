@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _MODELEXPRESS_RECEIVE_DURATION_PHASES = {
     "perf/mx_receive_delta_index_download": "delta_index_download",
+    "perf/mx_receive_delta_download": "delta_download",
     "perf/mx_receive_delta_apply": "delta_apply",
     "perf/mx_receive_prepare_time": "prepare",
     "perf/mx_receive_install_time": "install",
@@ -431,7 +432,8 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             documentation=(
                 "Duration of the most recent ModelExpress receive phase on this "
                 "scheduler rank (seconds). `phase` is one of: "
-                "delta_index_download, delta_apply, prepare, install."
+                "delta_index_download, delta_download, delta_apply, prepare, "
+                "install."
             ),
             labelnames=[*labels.keys(), "phase"],
             multiprocess_mode="mostrecent",

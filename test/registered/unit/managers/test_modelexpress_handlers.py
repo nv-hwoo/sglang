@@ -133,16 +133,12 @@ def test_generator_client_is_built_once_on_first_manager_access(
             built.append(config)
             return generator
 
-    class WeightPayloadFormat:
-        XOR_DELTA = "xor-delta"
-
     modelexpress_modules.ModelExpressGeneratorClient = ModelExpressGeneratorClient
     modelexpress_modules.ModelExpressGeneratorConfig = Config
     modelexpress_modules.S3GeneratorConfig = Config
     modelexpress_modules.SglangGeneratorContext = lambda model_runner: SimpleNamespace(
         model_runner=model_runner
     )
-    modelexpress_modules.WeightPayloadFormat = WeightPayloadFormat
 
     status = updater.get_modelexpress_status(GetModelExpressStatusReqInput())
     prepared = updater.prepare_weights_from_modelexpress(
@@ -155,8 +151,8 @@ def test_generator_client_is_built_once_on_first_manager_access(
     config = built[0]
     assert config.engine_context.model_runner is updater.tp_worker.model_runner
     assert config.model_name == "model"
-    assert config.payload_format == WeightPayloadFormat.XOR_DELTA
     assert config.server_url == "mx:8001"
+    assert set(vars(config)) == {"engine_context", "model_name", "s3", "server_url"}
     assert vars(config.s3) == {
         "endpoint_url": "http://minio:9000",
         "initial_base_version_id": "base-a",
@@ -199,6 +195,7 @@ def test_scheduler_handlers_drive_generator_client_stage_and_apply():
     ("metric_name", "phase"),
     [
         ("perf/mx_receive_delta_index_download", "delta_index_download"),
+        ("perf/mx_receive_delta_download", "delta_download"),
         ("perf/mx_receive_delta_apply", "delta_apply"),
         ("perf/mx_receive_prepare_time", "prepare"),
         ("perf/mx_receive_install_time", "install"),
