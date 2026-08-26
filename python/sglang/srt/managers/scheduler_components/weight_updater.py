@@ -170,7 +170,8 @@ class SchedulerWeightUpdaterManager:
             from modelexpress_rl import (
                 ModelExpressGeneratorClient,
                 ModelExpressGeneratorConfig,
-                S3GeneratorConfig,
+                ObjectStorageGeneratorConfig,
+                ObjectStorageType,
                 SglangGeneratorContext,
             )
 
@@ -186,7 +187,8 @@ class SchedulerWeightUpdaterManager:
                     engine_context=SglangGeneratorContext(model_runner),
                     model_name=args.modelexpress_model_name,
                     server_url=args.modelexpress_server_url,
-                    s3=S3GeneratorConfig(
+                    object_storage=ObjectStorageGeneratorConfig(
+                        storage_type=ObjectStorageType.S3,
                         initial_base_version_id=(
                             args.modelexpress_initial_base_version_id
                         ),

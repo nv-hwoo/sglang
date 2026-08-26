@@ -135,7 +135,8 @@ def test_generator_client_is_built_once_on_first_manager_access(
 
     modelexpress_modules.ModelExpressGeneratorClient = ModelExpressGeneratorClient
     modelexpress_modules.ModelExpressGeneratorConfig = Config
-    modelexpress_modules.S3GeneratorConfig = Config
+    modelexpress_modules.ObjectStorageGeneratorConfig = Config
+    modelexpress_modules.ObjectStorageType = SimpleNamespace(S3="S3")
     modelexpress_modules.SglangGeneratorContext = lambda model_runner: SimpleNamespace(
         model_runner=model_runner
     )
@@ -152,12 +153,18 @@ def test_generator_client_is_built_once_on_first_manager_access(
     assert config.engine_context.model_runner is updater.tp_worker.model_runner
     assert config.model_name == "model"
     assert config.server_url == "mx:8001"
-    assert set(vars(config)) == {"engine_context", "model_name", "s3", "server_url"}
-    assert vars(config.s3) == {
+    assert set(vars(config)) == {
+        "engine_context",
+        "model_name",
+        "object_storage",
+        "server_url",
+    }
+    assert vars(config.object_storage) == {
         "endpoint_url": "http://minio:9000",
         "initial_base_version_id": "base-a",
         "launch_checkpoint": "/models/launch",
         "preparation_cache_dir": "/tmp/mx-cache",
+        "storage_type": "S3",
     }
     assert updater.modelexpress_generator is generator
     assert generator.staged[0].version_id == "2"
