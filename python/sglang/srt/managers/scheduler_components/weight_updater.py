@@ -192,8 +192,8 @@ class SchedulerWeightUpdaterManager:
                         initial_base_version_id=(
                             args.modelexpress_initial_base_version_id
                         ),
-                        launch_checkpoint=checkpoint,
-                        preparation_cache_dir=(args.modelexpress_preparation_cache_dir),
+                        seed_checkpoint_path=checkpoint,
+                        refit_checkpoint_dir=(args.modelexpress_preparation_cache_dir),
                         endpoint_url=args.modelexpress_s3_endpoint_url,
                     ),
                 )

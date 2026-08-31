@@ -162,8 +162,8 @@ def test_generator_client_is_built_once_on_first_manager_access(
     assert vars(config.object_storage) == {
         "endpoint_url": "http://minio:9000",
         "initial_base_version_id": "base-a",
-        "launch_checkpoint": "/models/launch",
-        "preparation_cache_dir": "/tmp/mx-cache",
+        "seed_checkpoint_path": "/models/launch",
+        "refit_checkpoint_dir": "/tmp/mx-cache",
         "storage_type": "S3",
     }
     assert updater.modelexpress_generator is generator

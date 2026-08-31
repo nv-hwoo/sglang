@@ -874,9 +874,7 @@ class TokenizerControlMixin:
     def _merge_modelexpress_results(results, mutation_phase: bool):
         if not results:
             raise RuntimeError("ModelExpress update returned no engine-local results")
-        identities = {
-            (result.installed_version, result.state) for result in results
-        }
+        identities = {(result.installed_version, result.state) for result in results}
         failures = [result for result in results if not result.success]
         if mutation_phase and (
             any(result.state == "POISONED" for result in results)

@@ -336,9 +336,7 @@ class Model:
     modelexpress_server_url: A[
         Optional[str], "ModelExpress RefitService gRPC endpoint."
     ] = None
-    modelexpress_model_name: A[
-        Optional[str], "ModelExpress Refit model name."
-    ] = None
+    modelexpress_model_name: A[Optional[str], "ModelExpress Refit model name."] = None
     modelexpress_initial_base_version_id: A[
         Optional[str], "Exact Refit base version loaded at engine startup."
     ] = None
